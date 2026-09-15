@@ -11,10 +11,16 @@ function daysAgo(n) {
 // 综合排序：找近期被广泛 star 的仓库（即"trending" 的近似）
 async function searchRepos({ since, label }) {
   const url = `https://api.github.com/search/repositories?q=stars:>300+pushed:>${daysAgo(since)}&sort=stars&order=desc&per_page=20`;
-  const json = await safeFetchJSON(url, {
-    timeout: 15000,
-    headers: { 'Accept': 'application/vnd.github+json', 'User-Agent': 'DL-monitor/0.1' },
-  });
+  const headers = {
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'DL-monitor/0.1',
+  };
+  // 可选 GITHUB_TOKEN：认证后 search 端点限流从 10/min 提升到 30/min
+  if (process.env.GITHUB_TOKEN) {
+    headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
+  }
+  const json = await safeFetchJSON(url, { timeout: 15000, headers });
   return (json.items || []).map(r => ({
     title: r.full_name,
     url: r.html_url,

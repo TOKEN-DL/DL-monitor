@@ -2,7 +2,8 @@
 import * as cheerio from 'cheerio';
 import { defineSource, safeFetchText } from './base.js';
 
-const ARXIV_URL = 'http://export.arxiv.org/api/query?search_query=cat:cs.AI+OR+cat:cs.CL+OR+cat:cs.LG&sortBy=submittedDate&sortOrder=descending&max_results=30';
+// arXiv 官方要求 HTTPS；HTTP 会触发重定向并影响稳定性
+const ARXIV_URL = 'https://export.arxiv.org/api/query?search_query=cat:cs.AI+OR+cat:cs.CL+OR+cat:cs.LG&sortBy=submittedDate&sortOrder=descending&max_results=30';
 
 export function arxiv() {
   return defineSource('arxiv', async () => {
@@ -23,7 +24,8 @@ export function arxiv() {
       }
     }
     if (!xml) throw lastErr;
-    const $ = cheerio.load(xml, { xmlMode: true });
+    // cheerio 1.x 推荐用 xml: true（替代旧 xmlMode: true）
+    const $ = cheerio.load(xml, { xml: true });
     const items = [];
     $('entry').each((_, el) => {
       const $e = $(el);

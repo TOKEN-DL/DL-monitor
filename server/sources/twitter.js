@@ -37,25 +37,34 @@ export function twitter() {
 }
 
 /**
- * 调用 twitterapi.io advanced_search
+ * 调用 twitterapi.io advanced_search（自动翻页，每页 20 条，最深 3 页=180 条/查询）
  * @param {string} query - 关键词或 Twitter 高级搜索语法
  * @param {'Latest'|'Top'} queryType
  */
 async function searchTweets(query, queryType = 'Latest') {
-  const params = new URLSearchParams({
-    query: wrapQuery(query),
-    queryType,
-  });
-  const url = `${TWITTER_API_BASE}/twitter/tweet/advanced_search?${params}`;
-  const json = await safeFetchJSON(url, {
-    timeout: 15000,
-    headers: {
-      'X-API-Key': config.twitter.apiKey,
-      'Accept': 'application/json',
-    },
-  });
-  const tweets = Array.isArray(json.tweets) ? json.tweets : [];
-  return tweets.map(toItem);
+  const all = [];
+  const MAX_PAGES = 3;
+  let cursor = '';
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const params = new URLSearchParams({
+      query: wrapQuery(query),
+      queryType,
+    });
+    if (cursor) params.set('cursor', cursor);
+    const url = `${TWITTER_API_BASE}/twitter/tweet/advanced_search?${params}`;
+    const json = await safeFetchJSON(url, {
+      timeout: 15000,
+      headers: {
+        'X-API-Key': config.twitter.apiKey,
+        'Accept': 'application/json',
+      },
+    });
+    const tweets = Array.isArray(json.tweets) ? json.tweets : [];
+    all.push(...tweets.map(toItem));
+    if (!json.has_next_page || !json.next_cursor) break;
+    cursor = json.next_cursor;
+  }
+  return all;
 }
 
 /**
