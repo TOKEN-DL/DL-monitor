@@ -1,0 +1,26 @@
+{
+  "name": "dl-monitor",
+  "version": "0.1.0",
+  "description": "AI 热点自动监控系统：监控关键词、多源抓取、AI 分析、实时通知",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "build:web": "npm --prefix web run build",
+    "dev:web": "npm --prefix web run dev",
+    "gen-vapid": "node scripts/gen-vapid.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.9.16",
+    "web-push": "^3.6.7",
+    "ws": "^8.18.0"
+  }
+}

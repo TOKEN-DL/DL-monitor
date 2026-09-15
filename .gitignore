@@ -1,0 +1,17 @@
+node_modules/
+data/
+.env
+*.log
+.DS_Store
+.vscode/
+
+# 前端构建产物（可由 npm run build:web 重新生成）
+web/dist/
+web/node_modules/
+
+# 测试与评估
+.deepeval/
+
+# 临时文件
+*.tmp
+*.bak
