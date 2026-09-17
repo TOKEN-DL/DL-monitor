@@ -1,5 +1,7 @@
 // GitHub Trending：使用 GitHub Search API（GitHub trending 页面是 React SPA，HTML 无数据）
 import { defineSource, safeFetchJSON } from './base.js';
+import { config } from '../config.js';
+import { filterGithub } from './quality.js';
 
 // 计算 "N 天前" 的 ISO 日期
 function daysAgo(n) {
@@ -47,10 +49,18 @@ export function github() {
     if (daily.status === 'fulfilled') items.push(...daily.value);
     if (weekly.status === 'fulfilled') items.push(...weekly.value);
     const seen = new Set();
-    return items.filter(it => {
+    const deduped = items.filter(it => {
       if (seen.has(it.url)) return false;
       seen.add(it.url);
       return true;
     });
+    const { items: filtered, stats } = filterGithub(deduped, {
+      ...config.thresholds.github,
+      windowHours: config.windows.github,
+    });
+    if (deduped.length !== filtered.length) {
+      console.log(`[source:github] filter: ${deduped.length} → ${filtered.length} (stars<${config.thresholds.github.minStars}:${stats.byStars})`);
+    }
+    return filtered;
   }, { description: 'GitHub Trending via Search API' });
 }

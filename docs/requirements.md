@@ -107,6 +107,101 @@
 2. Web Push（浏览器后台/锁屏时仍能通知）
 3. 邮件聚合（每日 9 点 / 21 点 Top 10 留底）
 
+### D8：Twitter 质量过滤（三层防线）
+
+**问题**：twitterapi.io 默认返回 Top/Latest 推文含大量不知名博主的回复/转发，浏览量低、信号弱。
+
+**方案**：
+- **L1 源端硬过滤**（fetch 阶段）：粉丝 ≥ 5000、浏览量 ≥ 2000、过滤回复/转发、近 6h 时间窗
+- **L2 白名单**：`twitter_whitelist` 表，AI 公司官号、知名 KOL（@karpathy、@sama 等）跳过粉丝阈值
+- **L3 AI 加权**：`analyze.js` 在 userMsg 注入 verified / followers / views 信号，AI 评估时加权 0.1-0.2；白名单命中时 importance 基础 +0.1
+
+**失败兜底**：白名单命中后仍受时间窗约束；过滤后空集合不阻塞其它源
+
+### D9：信息源扩展（B站 + Google News RSS）
+
+**问题**：5 个源中 Twitter 占绝对多数，缺少中文视频与全球新闻覆盖。
+
+**最终方案**：新增 B站（关键词搜索）+ Google News RSS 两个源
+- **B站**：搜索 API `api.bilibili.com/x/web-interface/search/all/v2`，可选 SESSDATA 提高限额；过滤：播放 ≥ 2000 + UP主粉丝 ≥ 5000 + 6h 窗
+- **Google News**：RSS 端点免费无 key；仅时间窗过滤（无浏览量字段）；用 `<source>` 字段标记原始媒体
+- 老源（HN/GitHub/HF/arXiv）也接入质量过滤（HN: score+descendants、GitHub: stars、HF: downloads、arXiv: 仅时间窗）
+- arXiv/HF 因低频默认时间窗 168h（7天），与 6h 用户的字面要求冲突但实际需要
+
+**理由**：
+- AI 圈最丰富的中文视频内容在 B站（教程/解读/直播录像）
+- Google News 是全球新闻最权威的聚合（自带去重+权威度）
+- 全部走同一套 `BaseSource` 接口，AI 分析、通知、邮件复用
+
+**放弃**：
+- Reddit（噪音过大，即使过滤也不及 Google News 权威）
+- TheRundown/Ben's Bites（RSS 内容与 Google News 重叠度高）
+
+### D10：国内源 + 账号识别机制（Round 2）
+
+**问题**：
+- Round 1 后信息源仍以海外为主（Twitter + Google + HN/GitHub/HF/arXiv + B站）
+- 用户希望直接查询特定博主的信息（@karpathy 这种），而不是泛关键词搜索
+- 国内源（知乎/微博）官方 API 对未登录用户强反爬，几乎无免 KEY 可达路径
+
+**方案**：
+1. **知乎热搜词源** (`zhihu-trends.js`)：使用公开接口 `/api/v4/search/top_search` 拉热搜词列表（无 KEY、国内可达）
+   - 每条只有关键词，无文章详情链接
+   - 作为"今日热议信号"：用户关键词命中热搜词时 AI importance 加 0.1-0.2
+   - 默认开启（`SOURCE_ZHIHU_TRENDS=1`）
+2. **微博热搜源** (`weibo-trends.js`)：占位实现
+   - 已知 m.weibo.cn API 432 风控；web 端 302→404；RSSHub 公共实例在本网络不可达
+   - 当用户配置 `WEIBO_TRENDS_RSSHUB_URL` 时自动启用（用户自部署 RSSHub 实例）
+   - 默认禁用（`SOURCE_WEIBO_TRENDS=0`）
+3. **B站源升级**：在 `bilibili.js` 单次请求同时返回视频 + UP主（`search_type=video` & `search_type=user` 各一次）
+   - 视频走原有 `filterBilibili`（播放 + 粉丝 + 6h）
+   - UP主仅粉丝阈值（无时间窗/播放量）
+4. **账号识别机制**（仅 B站）：
+   - 语法：关键词以 `@` 开头（如 `@karpathy`、`@机器之心`）
+   - 解析：`server/sources/account-resolver.js` → `parseAccountKeyword` 检测 `@` 前缀
+   - 执行：复用 `BaseSource` 接口创建 `account:bilibili:{handle}` 虚拟源
+   - 频率：`CRON_ACCOUNT_RESOLVE=7 * * * *`（每小时第 7 分钟）
+   - UI：HotspotCard 渲染**博主卡片**布局（头像 + 名称 + 签名 + 粉丝 + UP 主页链接）
+
+**理由**：
+- 在"免 KEY"硬约束下，B站是国内唯一稳定可达的开放 API
+- 账号识别走同一 `BaseSource` 复用全链路（filter/pipeline/notify/WS/Push）
+- 知乎/微博热搜词作为"轻量信号源"，承认信息有限但保留扩展点
+
+**放弃**：
+- 知乎热榜详情（需 zse-ck 反爬算法，403）
+- 微博热搜详情（m.weibo.cn 432、web 302、第三方 API 在本网络不可达）
+- 知乎用户主页抓取（zse-ck 反爬）
+- 微博用户主页抓取（m.weibo.cn 302）
+
+### D11：信息源管理（DB 驱动统一管理内置 + 用户源）
+
+**问题**：
+- 内置源开关散落在 `.env`，需要重启服务才能生效
+- 用户想添加自定义信息源（如机器之心、36氪、InfoQ）但系统硬编码不支持
+- 关闭源后，存量热点仍出现在列表中
+
+**方案**：
+- 新建 `sources` 表统一管理所有源（内置 + 用户）
+- `kind='builtin'`：仅可切换 enabled（用户 UI 开关 = 修改 DB 的 enabled 字段）
+- `kind='user'`：可增删改切；删除时同时清除其历史热点
+- 添加新源时立即抓一次测试（`test_fetch=true`），返回 `test_ok / test_count / test_error`
+- 关闭源后：`/api/hotspots` 用 `enabledSet()` 过滤，**数据保留在 DB**（重新开启会恢复）
+- 通用爬虫策略：RSS 自动发现 → 降级 HTML 标题抓取（`<article>` / `<h2>`/`<h3>` / `<li><a>`）
+- 用户源共享 cron：`CRON_USER_SOURCES=13,43 * * * *`（默认每小时第 13 / 43 分钟，避开整点）
+- API 增删改后立即 `initSources() + stopScheduler() + startScheduler()` 重启调度
+
+**理由**：
+- 统一表结构避免内置/用户两套机制并存
+- `enabled` 在 DB 而不是 .env，UI 修改即时生效；.env 仅作为初次 seed 的默认值
+- 关闭后保留数据避免误删，重启用能恢复（用户友好）
+- RSS-first 覆盖 80%+ 站点，HTML 降级保证剩下也能用
+- 测试抓取让用户在添加时就知道是否可用（避免 silent failure）
+
+**放弃**：
+- 通用 HTML 渲染（cheerio + jsdom 等重依赖）— SSR 缺失的站点（36kr 等）即便渲染也拿不到数据
+- 全文抓取 + 正则提取正文 — 风险高（破坏页面结构），HTML 标题已能满足"信号到嘴边"的核心诉求
+
 ## 4. 性能与可用性指标
 
 | 指标 | 目标 |

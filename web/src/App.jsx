@@ -8,14 +8,22 @@ import { ToastStack } from "./components/ToastStack";
 import { useKeywords } from "./hooks/useKeywords";
 import { useHotspots } from "./hooks/useHotspots";
 import { useStatus } from "./hooks/useStatus";
+import { useWhitelist } from "./hooks/useWhitelist";
 import { useWebSocket } from "./lib/ws";
 import { pushApi, runApi } from "./lib/api";
 import { urlBase64ToUint8Array } from "./lib/utils";
 
 export default function App() {
   const { keywords, add, remove } = useKeywords();
-  const { items, loading, filters, setFilter, refresh, prepend } = useHotspots();
   const { status, wsLive } = useStatus();
+  // 从 /api/status 拿前端二次过滤阈值（默认值兜底）
+  const thresholds = {
+    minViews: status?.filters?.minViews ?? 2000,
+    minFollowers: status?.filters?.minFollowers ?? 5000,
+    minImportance: status?.filters?.minImportance ?? 0.5,
+  };
+  const { items, loading, filters, setFilter, refresh, prepend } = useHotspots(thresholds);
+  const { items: whitelistItems, refresh: refreshWhitelist } = useWhitelist();
 
   const [pushOn, setPushOn] = useState(false);
   const [triggering, setTriggering] = useState(false);
@@ -41,7 +49,7 @@ export default function App() {
         if (msg.type === "hotspot") {
           prepend(msg.data);
           setNewIds((prev) => new Set(prev).add(msg.data.id));
-          // 弹 toast（仅 imp >= 0.7）
+          // 弹 toast（仅重要度 >= 0.7）
           const imp = msg.data.importance ?? msg.data.ai_importance ?? 0;
           if (imp >= 0.7) {
             const id = Date.now() + Math.random();
@@ -49,7 +57,7 @@ export default function App() {
               ...prev,
               {
                 id,
-                title: `${(msg.data.source || "").toUpperCase()} · ${imp.toFixed(2)}`,
+                title: `${(msg.data.source || "").toUpperCase()} · 重要度 ${imp.toFixed(2)}`,
                 msg: msg.data.title || msg.data.summary || "(无标题)",
                 url: msg.data.url,
                 ts: Date.now(),
@@ -130,6 +138,8 @@ export default function App() {
                 onRemove={remove}
                 filterKeyword={filters.keyword}
                 onFilterChange={(v) => setFilter({ keyword: v })}
+                whitelistItems={whitelistItems}
+                onWhitelistChange={refreshWhitelist}
               />
             </aside>
 

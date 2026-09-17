@@ -1,5 +1,7 @@
 // HuggingFace: 最新模型 + 最新 papers
 import { defineSource, safeFetchJSON } from './base.js';
+import { config } from '../config.js';
+import { filterHuggingface } from './quality.js';
 
 const HF_MODELS = 'https://huggingface.co/api/models?sort=createdAt&direction=-1&filter=text-generation&limit=30';
 const HF_PAPERS = 'https://huggingface.co/api/papers?sort=publishedAt&limit=30';
@@ -35,6 +37,13 @@ export function huggingface() {
         });
       }
     }
-    return items;
+    const { items: filtered, stats } = filterHuggingface(items, {
+      ...config.thresholds.huggingface,
+      windowHours: config.windows.huggingface,
+    });
+    if (items.length !== filtered.length) {
+      console.log(`[source:huggingface] filter: ${items.length} → ${filtered.length} (downloads<${config.thresholds.huggingface.minDownloads}:${stats.byDownloads})`);
+    }
+    return filtered;
   }, { description: 'HuggingFace latest models + papers' });
 }

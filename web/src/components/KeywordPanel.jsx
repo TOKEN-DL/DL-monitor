@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Plus, X, Search } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { BorderWrapper } from "./ui/moving-border";
+import { WhitelistPanel } from "./WhitelistPanel";
 
 const CATEGORIES = [
   { value: "general", label: "通用", color: "from-slate-500/30 to-slate-600/20" },
@@ -11,7 +12,20 @@ const CATEGORIES = [
   { value: "news", label: "新闻", color: "from-rose-500/30 to-pink-500/20" },
 ];
 
-export function KeywordPanel({ keywords, onAdd, onRemove, filterKeyword, onFilterChange }) {
+const SEED_WHITELIST = [
+  { handle: "karpathy", type: "person", note: "AI 教育" },
+  { handle: "sama", type: "person", note: "OpenAI CEO" },
+  { handle: "ylecun", type: "person", note: "Meta AI 首席" },
+  { handle: "AnthropicAI", type: "company", note: "Claude 团队" },
+  { handle: "OpenAI", type: "company", note: "GPT 团队" },
+  { handle: "GoogleDeepMind", type: "company", note: "Gemini 团队" },
+  { handle: "huggingface", type: "company", note: "HF 平台" },
+  { handle: "MistralAI", type: "company", note: "Mistral 团队" },
+  { handle: "deepseek_ai", type: "company", note: "DeepSeek" },
+  { handle: "karminski3", type: "person", note: "AI 资讯搬运" },
+];
+
+export function KeywordPanel({ keywords, onAdd, onRemove, filterKeyword, onFilterChange, whitelistItems, onWhitelistChange }) {
   const [text, setText] = useState("");
   const [category, setCategory] = useState("model");
 
@@ -30,7 +44,7 @@ export function KeywordPanel({ keywords, onAdd, onRemove, filterKeyword, onFilte
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder="输入关键词，如 Claude、GPT-5"
+            placeholder="输入关键词或 @博主（如 Claude、@karpathy）"
             className="flex-1 rounded-lg border border-slate-700/60 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
           />
           <button
@@ -59,6 +73,9 @@ export function KeywordPanel({ keywords, onAdd, onRemove, filterKeyword, onFilte
             </button>
           ))}
         </div>
+        <p className="text-[10px] text-slate-500 leading-relaxed">
+          提示：以 <span className="text-pink-300 font-mono">@</span> 开头的关键词会被识别为 B站 UP主查询（如 <span className="font-mono">@karpathy</span>）。
+        </p>
       </form>
 
       {/* 关键词列表（MovingBorder） */}
@@ -81,6 +98,7 @@ export function KeywordPanel({ keywords, onAdd, onRemove, filterKeyword, onFilte
             )}
             {keywords.map((kw) => {
               const cat = CATEGORIES.find((c) => c.value === kw.category) || CATEGORIES[0];
+              const isAccount = kw.text.startsWith('@');
               return (
                 <motion.div
                   key={kw.id}
@@ -94,7 +112,9 @@ export function KeywordPanel({ keywords, onAdd, onRemove, filterKeyword, onFilte
                     duration={5000 + kw.id * 137}
                     containerClassName="w-full"
                     className="px-3 py-2 flex items-center justify-between"
-                    borderClassName="h-16 w-16 bg-[radial-gradient(#8b5cf6_30%,transparent_60%)]"
+                    borderClassName={isAccount
+                      ? "h-16 w-16 bg-[radial-gradient(#ec4899_40%,transparent_70%)]"
+                      : "h-16 w-16 bg-[radial-gradient(#8b5cf6_30%,transparent_60%)]"}
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <span
@@ -105,6 +125,11 @@ export function KeywordPanel({ keywords, onAdd, onRemove, filterKeyword, onFilte
                       >
                         {cat.label}
                       </span>
+                      {isAccount && (
+                        <span className="shrink-0 rounded-md bg-pink-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-pink-300 border border-pink-500/30">
+                          博主
+                        </span>
+                      )}
                       <span className="truncate text-sm font-medium text-slate-100">
                         {kw.text}
                       </span>
@@ -136,6 +161,13 @@ export function KeywordPanel({ keywords, onAdd, onRemove, filterKeyword, onFilte
           className="w-full rounded-lg border border-slate-700/60 bg-slate-900/60 pl-8 pr-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-500/20"
         />
       </div>
+
+      {/* KOL 白名单 */}
+      <WhitelistPanel
+        items={whitelistItems}
+        onChange={onWhitelistChange}
+        seedList={SEED_WHITELIST}
+      />
     </div>
   );
 }

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS hotspots (
   source_id TEXT,
   url TEXT NOT NULL,
   title TEXT NOT NULL,
+  title_zh TEXT,
   content TEXT,
   meta TEXT,
   published_at INTEGER,
@@ -37,12 +38,14 @@ CREATE TABLE IF NOT EXISTS hotspots (
   ai_importance REAL,
   ai_summary TEXT,
   matched_keywords TEXT,
-  notified_at INTEGER
+  notified_at INTEGER,
+  archived_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_hotspots_fetched ON hotspots(fetched_at DESC);
 CREATE INDEX IF NOT EXISTS idx_hotspots_score ON hotspots(ai_importance DESC);
 CREATE INDEX IF NOT EXISTS idx_hotspots_source ON hotspots(source);
+CREATE INDEX IF NOT EXISTS idx_hotspots_published ON hotspots(published_at DESC);
 
 CREATE TABLE IF NOT EXISTS subscriptions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,19 +69,70 @@ CREATE TABLE IF NOT EXISTS ai_cache (
   importance REAL,
   summary TEXT,
   matched_keywords TEXT,
+  title_zh TEXT,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS twitter_whitelist (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  handle TEXT UNIQUE NOT NULL,
+  type TEXT DEFAULT 'person',
+  note TEXT,
+  created_at INTEGER NOT NULL
+);
+
+-- 信息源注册表（统一管理内置源 + 用户新增源）
+-- name: 来源 ID（如 'twitter' / 'user:abc-news'）
+-- kind: 'builtin' = 内置（不可删除，仅切换 enabled）；'user' = 用户新增（可删/改/切）
+-- config: JSON 字符串，用户源的 URL / 内置源的额外配置
+CREATE TABLE IF NOT EXISTS sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  label TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'user',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  config TEXT,
+  last_run_at INTEGER,
+  last_status TEXT,
+  last_error TEXT,
+  last_count INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sources_enabled ON sources(enabled);
 `;
 
 db.exec(SCHEMA);
+
+// Schema migration: 给已存在的 hotspots 表添加 archived_at 列（信息保留策略）
+const hotspotCols = db.prepare("PRAGMA table_info(hotspots)").all();
+if (!hotspotCols.find(c => c.name === 'archived_at')) {
+  db.exec('ALTER TABLE hotspots ADD COLUMN archived_at INTEGER');
+  console.log('[db] migration: added hotspots.archived_at column');
+}
+if (!hotspotCols.find(c => c.name === 'title_zh')) {
+  db.exec('ALTER TABLE hotspots ADD COLUMN title_zh TEXT');
+  console.log('[db] migration: added hotspots.title_zh column');
+}
+
+const hotspotIdx = db.prepare("PRAGMA index_list(hotspots)").all();
+if (!hotspotIdx.find(i => i.name === 'idx_hotspots_archived')) {
+  db.exec('CREATE INDEX IF NOT EXISTS idx_hotspots_archived ON hotspots(archived_at, fetched_at DESC)');
+}
+
+const cacheCols = db.prepare("PRAGMA table_info(ai_cache)").all();
+if (!cacheCols.find(c => c.name === 'title_zh')) {
+  db.exec('ALTER TABLE ai_cache ADD COLUMN title_zh TEXT');
+  console.log('[db] migration: added ai_cache.title_zh column');
+}
 
 // Prepared statements
 const stmtFindHash = db.prepare('SELECT id FROM hotspots WHERE content_hash = ?');
 const stmtInsertHotspot = db.prepare(`
   INSERT INTO hotspots
-    (source, source_id, url, title, content, meta, published_at, fetched_at, content_hash,
+    (source, source_id, url, title, title_zh, content, meta, published_at, fetched_at, content_hash,
      ai_score, ai_importance, ai_summary, matched_keywords)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 export function hashContent(url) {
@@ -99,6 +153,7 @@ export function insertHotspotIfNew(item) {
     item.source_id || null,
     item.url,
     item.title || '(no title)',
+    item.title_zh || null,
     item.content || null,
     item.meta ? JSON.stringify(item.meta) : null,
     item.published_at || null,
@@ -112,16 +167,17 @@ export function insertHotspotIfNew(item) {
   return { isNew: true, id: info.lastInsertRowid };
 }
 
-export function updateHotspotAI(id, { ai_score, ai_importance, ai_summary, matched_keywords }) {
+export function updateHotspotAI(id, { ai_score, ai_importance, ai_summary, matched_keywords, title_zh }) {
   db.prepare(`
     UPDATE hotspots
-    SET ai_score = ?, ai_importance = ?, ai_summary = ?, matched_keywords = ?
+    SET ai_score = ?, ai_importance = ?, ai_summary = ?, matched_keywords = ?, title_zh = ?
     WHERE id = ?
   `).run(
     ai_score ?? null,
     ai_importance ?? null,
     ai_summary ?? null,
     matched_keywords ? JSON.stringify(matched_keywords) : null,
+    title_zh ?? null,
     id,
   );
 }
@@ -154,12 +210,33 @@ export const keywordsRepo = {
 };
 
 export const hotspotsRepo = {
-  list({ limit = 100, source = null, minImportance = 0, keyword = null } = {}) {
+  /**
+   * 列出热点
+   * @param {Object} opts
+   * @param {number} [opts.limit=100]
+   * @param {string} [opts.source]
+   * @param {number} [opts.minImportance=0]
+   * @param {string} [opts.keyword]
+   * @param {'active'|'archived'|'all'} [opts.archive='active'] - 信息保留策略过滤
+   *   - active: archived_at IS NULL AND fetched_at >= now - windowDays
+   *   - archived: archived_at IS NOT NULL
+   *   - all: 不加过滤
+   */
+  list({ limit = 100, source = null, minImportance = 0, keyword = null, archive = 'active', windowMs = 0 } = {}) {
     const where = [];
     const params = [];
     if (source) { where.push('source = ?'); params.push(source); }
     if (minImportance) { where.push('(ai_importance IS NULL OR ai_importance >= ?)'); params.push(minImportance); }
     if (keyword) { where.push('matched_keywords LIKE ?'); params.push(`%${keyword}%`); }
+    if (archive === 'active') {
+      where.push('archived_at IS NULL');
+      if (windowMs > 0) {
+        where.push('fetched_at >= ?');
+        params.push(Date.now() - windowMs);
+      }
+    } else if (archive === 'archived') {
+      where.push('archived_at IS NOT NULL');
+    }
     const sql = `SELECT * FROM hotspots ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY COALESCE(ai_importance, 0.5) DESC, fetched_at DESC LIMIT ?`;
     params.push(limit);
     return db.prepare(sql).all(...params);
@@ -172,6 +249,22 @@ export const hotspotsRepo = {
   },
   get(id) {
     return db.prepare('SELECT * FROM hotspots WHERE id = ?').get(id);
+  },
+  archive(id) {
+    return db.prepare('UPDATE hotspots SET archived_at = ? WHERE id = ? AND archived_at IS NULL').run(Date.now(), id).changes;
+  },
+  unarchive(id) {
+    return db.prepare('UPDATE hotspots SET archived_at = NULL WHERE id = ?').run(id).changes;
+  },
+  /** 取回所有候选项（信息保留策略用） */
+  retentionCandidates(cutoff) {
+    return db.prepare(`
+      SELECT id, source, meta, fetched_at FROM hotspots
+      WHERE archived_at IS NULL AND fetched_at < ?
+    `).all(cutoff);
+  },
+  purge(id) {
+    return db.prepare('DELETE FROM hotspots WHERE id = ?').run(id).changes;
   },
 };
 
@@ -211,15 +304,135 @@ export const aiCache = {
   },
   put(hash, data) {
     db.prepare(`
-      INSERT OR REPLACE INTO ai_cache (content_hash, score, importance, summary, matched_keywords, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO ai_cache (content_hash, score, importance, summary, matched_keywords, title_zh, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
       hash,
       data.score ?? null,
       data.importance ?? null,
       data.summary ?? null,
       data.matched_keywords ? JSON.stringify(data.matched_keywords) : null,
+      data.title_zh ?? null,
       Date.now(),
     );
+  },
+};
+
+export const whitelistRepo = {
+  list() {
+    return db.prepare('SELECT * FROM twitter_whitelist ORDER BY id DESC').all();
+  },
+  add(handle, type = 'person', note = '') {
+    const h = String(handle || '').trim().replace(/^@/, '').toLowerCase();
+    if (!h) return null;
+    const stmt = db.prepare(
+      'INSERT OR IGNORE INTO twitter_whitelist (handle, type, note, created_at) VALUES (?, ?, ?, ?)'
+    );
+    const info = stmt.run(h, type, note, Date.now());
+    if (info.changes === 0) return null;
+    return db.prepare('SELECT * FROM twitter_whitelist WHERE id = ?').get(info.lastInsertRowid);
+  },
+  remove(id) {
+    return db.prepare('DELETE FROM twitter_whitelist WHERE id = ?').run(id).changes;
+  },
+  hasSet() {
+    // 返回 Set<lowercase handle> 给热路径用
+    const rows = db.prepare('SELECT handle FROM twitter_whitelist').all();
+    return new Set(rows.map(r => String(r.handle).toLowerCase()));
+  },
+  count() {
+    return db.prepare('SELECT COUNT(*) AS n FROM twitter_whitelist').get().n;
+  },
+};
+
+/**
+ * 信息源注册表
+ * - 内置源（kind='builtin'）：仅可切换 enabled，不可删除
+ * - 用户源（kind='user'）：可增删改切
+ * - 删除用户源时同时清理对应 hotspots（避免孤儿数据）
+ */
+export const sourcesRepo = {
+  list() {
+    return db.prepare('SELECT * FROM sources ORDER BY kind DESC, id ASC').all();
+  },
+  listEnabled() {
+    return db.prepare('SELECT * FROM sources WHERE enabled = 1 ORDER BY kind DESC, id ASC').all();
+  },
+  listUser() {
+    return db.prepare("SELECT * FROM sources WHERE kind = 'user' ORDER BY id DESC").all();
+  },
+  get(name) {
+    return db.prepare('SELECT * FROM sources WHERE name = ?').get(name);
+  },
+  getById(id) {
+    return db.prepare('SELECT * FROM sources WHERE id = ?').get(id);
+  },
+  /**
+   * 返回 Set<name>，热路径过滤用
+   */
+  enabledSet() {
+    const rows = db.prepare('SELECT name FROM sources WHERE enabled = 1').all();
+    return new Set(rows.map(r => r.name));
+  },
+  /**
+   * 新增用户源
+   * @returns {object|null} 新增行；name 重复返回 null
+   */
+  addUser({ name, label, url, enabled = 1 }) {
+    const safeName = String(name || '').trim();
+    const safeLabel = String(label || '').trim() || safeName;
+    if (!safeName || !url) return null;
+    const config = JSON.stringify({ url: String(url).trim() });
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO sources (name, label, kind, enabled, config, created_at)
+      VALUES (?, ?, 'user', ?, ?, ?)
+    `);
+    const info = stmt.run(safeName, safeLabel, enabled ? 1 : 0, config, Date.now());
+    if (info.changes === 0) return null;
+    return db.prepare('SELECT * FROM sources WHERE id = ?').get(info.lastInsertRowid);
+  },
+  remove(name) {
+    const row = this.get(name);
+    if (!row || row.kind !== 'user') return 0;
+    // 先清掉该源的热点
+    db.prepare('DELETE FROM hotspots WHERE source = ?').run(name);
+    return db.prepare('DELETE FROM sources WHERE name = ?').run(name).changes;
+  },
+  setEnabled(name, enabled) {
+    return db.prepare('UPDATE sources SET enabled = ? WHERE name = ?')
+      .run(enabled ? 1 : 0, name).changes;
+  },
+  renameLabel(name, label) {
+    return db.prepare('UPDATE sources SET label = ? WHERE name = ?')
+      .run(String(label || '').trim(), name).changes;
+  },
+  /**
+   * 启动时 seed 内置源（如果 rows 不存在）
+   * @param {Array<{name,label,defaultEnabled}>} builtins
+   * @returns {Array<{name,action:'inserted'|'kept'|'toggled'}>}
+   */
+  seedBuiltins(builtins) {
+    const results = [];
+    const insertStmt = db.prepare(`
+      INSERT OR IGNORE INTO sources (name, label, kind, enabled, config, created_at)
+      VALUES (?, ?, 'builtin', ?, ?, ?)
+    `);
+    // node:sqlite 没有 db.transaction()，手动 BEGIN/COMMIT
+    db.exec('BEGIN');
+    try {
+      for (const b of builtins) {
+        const r = insertStmt.run(b.name, b.label, b.defaultEnabled ? 1 : 0, null, Date.now());
+        if (r.changes === 1) results.push({ name: b.name, action: 'inserted' });
+        else results.push({ name: b.name, action: 'kept' });
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    return results;
+  },
+  count() {
+    return db.prepare('SELECT COUNT(*) AS n FROM sources').get().n;
   },
 };

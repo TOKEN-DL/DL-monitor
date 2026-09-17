@@ -1,6 +1,8 @@
 // arXiv: cs.AI / cs.CL / cs.LG 最新论文
 import * as cheerio from 'cheerio';
 import { defineSource, safeFetchText } from './base.js';
+import { config } from '../config.js';
+import { filterArxiv } from './quality.js';
 
 // arXiv 官方要求 HTTPS；HTTP 会触发重定向并影响稳定性
 const ARXIV_URL = 'https://export.arxiv.org/api/query?search_query=cat:cs.AI+OR+cat:cs.CL+OR+cat:cs.LG&sortBy=submittedDate&sortOrder=descending&max_results=30';
@@ -46,6 +48,12 @@ export function arxiv() {
         },
       });
     });
-    return items;
+    const { items: filtered, stats } = filterArxiv(items, {
+      windowHours: config.windows.arxiv,
+    });
+    if (items.length !== filtered.length) {
+      console.log(`[source:arxiv] filter: ${items.length} → ${filtered.length} (time:${stats.byTime})`);
+    }
+    return filtered;
   }, { description: 'arXiv cs.AI / cs.CL / cs.LG' });
 }

@@ -1,5 +1,7 @@
 // HackerNews 抓取：Firebase API
 import { defineSource, safeFetchJSON } from './base.js';
+import { config } from '../config.js';
+import { filterHackernews } from './quality.js';
 
 const HN_TOP = 'https://hacker-news.firebaseio.com/v0/topstories.json';
 const HN_ITEM = (id) => `https://hacker-news.firebaseio.com/v0/item/${id}.json`;
@@ -29,6 +31,14 @@ export function hackernews() {
         };
       } catch { return null; }
     }));
-    return results.filter(Boolean);
+    const filtered = results.filter(Boolean);
+    const { items, stats } = filterHackernews(filtered, {
+      ...config.thresholds.hackernews,
+      windowHours: config.windows.hackernews,
+    });
+    if (filtered.length !== items.length) {
+      console.log(`[source:hackernews] filter: ${filtered.length} → ${items.length} (score:${stats.byScore} descendants:${stats.byDescendants})`);
+    }
+    return items;
   }, { description: 'HackerNews Top Stories' });
 }
