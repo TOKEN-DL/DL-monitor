@@ -199,7 +199,9 @@ export function filterArxiv(items, opts) {
 }
 
 /**
- * B站过滤（播放 + 粉丝）
+ * B站过滤（按 kind 分流）
+ *   - 视频（is_up_master=false）：时间窗 + 播放量（视频搜索 API 不返回 UP 粉丝，跳过粉丝检查）
+ *   - UP主（is_up_master=true）：仅粉丝阈值（无时间窗 / 无 plays）
  * @param {Array} items
  * @param {Object} opts
  * @param {number} opts.minPlays
@@ -212,13 +214,21 @@ export function filterBilibili(items, opts) {
   const stats = { byTime: 0, byPlays: 0, byFollowers: 0, kept: 0 };
   const kept = [];
   for (const it of items) {
-    const ts = it.published_at;
-    if (!ts || ts < cutoff) { stats.byTime++; continue; }
     const meta = it.meta || {};
-    if ((meta.plays || 0) < minPlays) { stats.byPlays++; continue; }
-    if ((meta.followers || 0) < minFollowers) { stats.byFollowers++; continue; }
-    kept.push(it);
-    stats.kept++;
+    const isUP = meta.is_up_master === true;
+    if (isUP) {
+      // UP主：仅粉丝阈值
+      if ((meta.fans || 0) < minFollowers) { stats.byFollowers++; continue; }
+      kept.push(it);
+      stats.kept++;
+    } else {
+      // 视频：时间窗 + 播放量
+      const ts = it.published_at;
+      if (!ts || ts < cutoff) { stats.byTime++; continue; }
+      if ((meta.plays || 0) < minPlays) { stats.byPlays++; continue; }
+      kept.push(it);
+      stats.kept++;
+    }
   }
   return { items: kept, dropped: items.length - kept.length, stats };
 }

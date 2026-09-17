@@ -365,6 +365,22 @@ export function SourcePanel({ status, pushOn, onEnablePush }) {
               <Loader2 className="inline-block h-4 w-4 animate-spin" />
               <span className="ml-2">加载中…</span>
             </div>
+          ) : enriched.length === 0 ? (
+            // 空状态：API 没数据（后端未升级 / DB 无 sources 行）
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200 space-y-2">
+              <div className="font-semibold">⚠ 暂无信息源</div>
+              <div className="text-[11px] text-amber-300/80 leading-relaxed">
+                可能原因：①后端未升级到最新代码（需重启服务）<br />
+                ②数据库 sources 表为空（重启会自动 seed 内置源）
+              </div>
+              <button
+                type="button"
+                onClick={refresh}
+                className="flex items-center gap-1 rounded border border-amber-500/40 px-2 py-1 text-[11px] hover:bg-amber-500/15"
+              >
+                <RefreshCw className="h-3 w-3" /> 重新加载
+              </button>
+            </div>
           ) : (
             <AnimatePresence initial={false}>
               {enriched.map((s) => (
@@ -379,6 +395,11 @@ export function SourcePanel({ status, pushOn, onEnablePush }) {
                 />
               ))}
             </AnimatePresence>
+          )}
+          {error && (
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-2 text-[11px] text-rose-300">
+              API 错误：{error}
+            </div>
           )}
         </div>
 
