@@ -69,6 +69,51 @@ export function qualityScore(h) {
   return imp * 0.7 + norm * 0.3 + wlBonus;
 }
 
+/**
+ * 爆款阈值表（与 server/db.js hotspotsRepo.list 中 quick_tag=burst SQL 保持一致）
+ * 用于前端 C1 一键标签"爆款"判定
+ */
+export const BURST_THRESHOLDS = {
+  twitter:    { field: 'views',    min: 100000, label: '10w 浏览' },
+  bilibili:   { field: 'plays',    min: 50000,  label: '5w 播放' },
+  github:     { field: 'stars',    min: 500,    label: '500 ⭐' },
+  hackernews: { field: 'score',    min: 200,    label: 'score 200' },
+  huggingface:{ field: 'downloads',min: 1000,   label: '1k 下载' },
+};
+
+/**
+ * 计算 vph = 浏览量 / 发布时间→当前时间的小时数（用于 S7 热度爆发率排序）
+ * - 时间窗最小 1 分钟，避免新发布时除以 0
+ * - 适用于有浏览字段的源
+ */
+export function computeVph(h) {
+  const meta = h.meta || {};
+  const raw = meta.views || meta.plays || meta.stars || meta.downloads
+    || (meta.score ? meta.score * 5 : 0)
+    || 0;
+  if (!raw || !h.published_at) return 0;
+  const hours = Math.max(1 / 60, (h.fetched_at - h.published_at) / 3600000);
+  return raw / hours;
+}
+
+/**
+ * 是否爆款（用于 C1 一键标签"仅看爆款"）
+ */
+export function isBurst(h) {
+  const t = BURST_THRESHOLDS[h.source];
+  if (!t) return false;
+  const meta = h.meta || {};
+  const v = meta[t.field] || 0;
+  return v >= t.min;
+}
+
+/**
+ * 是否白名单 KOL（用于 C1 一键标签"仅看 KOL"）
+ */
+export function isKol(h) {
+  return h?.meta?.whitelisted === true;
+}
+
 export const SOURCE_LABELS = {
   hackernews: 'HackerNews',
   github: 'GitHub',

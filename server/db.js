@@ -214,32 +214,142 @@ export const hotspotsRepo = {
    * 列出热点
    * @param {Object} opts
    * @param {number} [opts.limit=100]
-   * @param {string} [opts.source]
+   * @param {string|null} [opts.source] - 单源过滤（向后兼容）
+   * @param {string[]} [opts.sources] - 多源过滤（任一匹配）
    * @param {number} [opts.minImportance=0]
-   * @param {string} [opts.keyword]
+   * @param {number} [opts.maxImportance=1] - 重要度上限
+   * @param {string} [opts.keyword] - 单关键词（向后兼容）
+   * @param {string[]} [opts.keywords] - 多关键词（任一命中）
    * @param {'active'|'archived'|'all'} [opts.archive='active'] - 信息保留策略过滤
    *   - active: archived_at IS NULL AND fetched_at >= now - windowDays
    *   - archived: archived_at IS NOT NULL
    *   - all: 不加过滤
+   * @param {number} [opts.windowMs=0] - 主动时间窗（毫秒）；0 = 用 retention.windowDays
+   * @param {number} [opts.customWindowMs] - 时间窗覆盖（来自 window 参数）；null = 不覆盖
+   * @param {'recent'|'published'|'importance'|'burst'} [opts.sort='recent']
+   *   - recent: 按 fetched_at DESC
+   *   - published: 按 published_at DESC NULLS LAST, fetched_at DESC
+   *   - importance: 按 ai_importance DESC, fetched_at DESC
+   *   - burst: 按 vph DESC（meta.views / hours_since_published，SQLite JSON 函数）
+   * @param {string[]} [opts.quickTags] - 一键标签：'kol'（白名单）/ 'burst'（爆款）
    */
-  list({ limit = 100, source = null, minImportance = 0, keyword = null, archive = 'active', windowMs = 0 } = {}) {
+  list(opts = {}) {
+    const {
+      limit = 100,
+      source = null,
+      sources = null,
+      minImportance = 0,
+      maxImportance = 1,
+      keyword = null,
+      keywords = null,
+      archive = 'active',
+      windowMs = 0,
+      customWindowMs = null,
+      sort = 'recent',
+      quickTags = [],
+    } = opts;
     const where = [];
     const params = [];
-    if (source) { where.push('source = ?'); params.push(source); }
-    if (minImportance) { where.push('(ai_importance IS NULL OR ai_importance >= ?)'); params.push(minImportance); }
-    if (keyword) { where.push('matched_keywords LIKE ?'); params.push(`%${keyword}%`); }
+    // 来源多选 vs 单选
+    if (Array.isArray(sources) && sources.length) {
+      where.push(`source IN (${sources.map(() => '?').join(',')})`);
+      params.push(...sources);
+    } else if (source) {
+      where.push('source = ?');
+      params.push(source);
+    }
+    // 重要度区间
+    if (minImportance > 0) {
+      where.push('(ai_importance IS NULL OR ai_importance >= ?)');
+      params.push(minImportance);
+    }
+    if (maxImportance < 1) {
+      where.push('(ai_importance IS NULL OR ai_importance <= ?)');
+      params.push(maxImportance);
+    }
+    // 关键词多选 vs 单选（matched_keywords = '["Claude","DeepSeek"]' 这种 JSON 字符串）
+    if (Array.isArray(keywords) && keywords.length) {
+      // 用 OR 包裹：任一命中
+      const kws = keywords.map((k) => `matched_keywords LIKE ?`).join(' OR ');
+      where.push(`(${kws})`);
+      params.push(...keywords.map((k) => `%${JSON.stringify(k).slice(1, -1)}%`));
+    } else if (keyword) {
+      where.push('matched_keywords LIKE ?');
+      params.push(`%${keyword}%`);
+    }
+    // 一键标签：KOL
+    if (quickTags.includes('kol')) {
+      where.push("json_extract(meta, '$.whitelisted') = 1");
+    }
+    // 一键标签：爆款（各源阈值，SQL 内查）
+    if (quickTags.includes('burst')) {
+      // (source, 字段, 阈值)
+      // Twitter views>=100000, B站 plays>=50000, GitHub stars>=500, HN score>=200, HF downloads>=1000
+      const burstConds = [
+        "(source = 'twitter' AND CAST(json_extract(meta, '$.views') AS REAL) >= 100000)",
+        "(source = 'bilibili' AND CAST(json_extract(meta, '$.plays') AS REAL) >= 50000)",
+        "(source = 'github' AND CAST(json_extract(meta, '$.stars') AS REAL) >= 500)",
+        "(source = 'hackernews' AND CAST(json_extract(meta, '$.score') AS REAL) >= 200)",
+        "(source = 'huggingface' AND CAST(json_extract(meta, '$.downloads') AS REAL) >= 1000)",
+      ];
+      where.push(`(${burstConds.join(' OR ')})`);
+    }
+    // 信息保留策略
     if (archive === 'active') {
       where.push('archived_at IS NULL');
-      if (windowMs > 0) {
+      const effectiveWindowMs = customWindowMs !== null ? customWindowMs : windowMs;
+      if (effectiveWindowMs > 0) {
         where.push('fetched_at >= ?');
-        params.push(Date.now() - windowMs);
+        params.push(Date.now() - effectiveWindowMs);
       }
     } else if (archive === 'archived') {
       where.push('archived_at IS NOT NULL');
     }
-    const sql = `SELECT * FROM hotspots ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY COALESCE(ai_importance, 0.5) DESC, fetched_at DESC LIMIT ?`;
+    // 排序
+    let orderBy;
+    switch (sort) {
+      case 'published':
+        orderBy = 'published_at DESC NULLS LAST, fetched_at DESC';
+        break;
+      case 'importance':
+        orderBy = 'ai_importance DESC NULLS LAST, fetched_at DESC';
+        break;
+      case 'burst':
+        // vph = views / max(1, hours_since_published)
+        // 各源 views 字段不同；SQLite 用 json_extract 取最强代理
+        orderBy = `(CASE
+          WHEN json_extract(meta, '$.views') IS NOT NULL THEN CAST(json_extract(meta, '$.views') AS REAL) / MAX(0.0167, CAST((fetched_at - COALESCE(published_at, fetched_at)) AS REAL) / 3600000.0)
+          WHEN json_extract(meta, '$.plays') IS NOT NULL THEN CAST(json_extract(meta, '$.plays') AS REAL) / MAX(0.0167, CAST((fetched_at - COALESCE(published_at, fetched_at)) AS REAL) / 3600000.0)
+          WHEN json_extract(meta, '$.stars') IS NOT NULL THEN CAST(json_extract(meta, '$.stars') AS REAL) / MAX(0.0167, CAST((fetched_at - COALESCE(published_at, fetched_at)) AS REAL) / 3600000.0)
+          WHEN json_extract(meta, '$.downloads') IS NOT NULL THEN CAST(json_extract(meta, '$.downloads') AS REAL) / MAX(0.0167, CAST((fetched_at - COALESCE(published_at, fetched_at)) AS REAL) / 3600000.0)
+          WHEN json_extract(meta, '$.score') IS NOT NULL THEN CAST(json_extract(meta, '$.score') AS REAL) / MAX(0.0167, CAST((fetched_at - COALESCE(published_at, fetched_at)) AS REAL) / 3600000.0)
+          ELSE 0 END) DESC, fetched_at DESC`;
+        break;
+      case 'recent':
+      default:
+        orderBy = 'fetched_at DESC';
+        break;
+    }
+    const sql = `SELECT * FROM hotspots ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${orderBy} LIMIT ?`;
     params.push(limit);
     return db.prepare(sql).all(...params);
+  },
+
+  /**
+   * 按来源计数（用于前端 chip 显示匹配数）
+   * @param {Object} opts - 同 list 的过滤参数（不含 limit / sort）
+   */
+  countBySource(opts = {}) {
+    const { sources = null, ...rest } = opts;
+    // 复用 list 的过滤逻辑：拿到 SQL 但 LIMIT 替换为 GROUP BY
+    const rows = this.list({ ...rest, sources, limit: 100000 });
+    const counts = {};
+    let total = 0;
+    for (const r of rows) {
+      counts[r.source] = (counts[r.source] || 0) + 1;
+      total++;
+    }
+    return { counts, total };
   },
   since(ts) {
     return db.prepare('SELECT * FROM hotspots WHERE fetched_at >= ? ORDER BY fetched_at DESC').all(ts);

@@ -9,6 +9,7 @@ import { useKeywords } from "./hooks/useKeywords";
 import { useHotspots } from "./hooks/useHotspots";
 import { useStatus } from "./hooks/useStatus";
 import { useWhitelist } from "./hooks/useWhitelist";
+import { useToastHistory } from "./hooks/useToastHistory";
 import { useWebSocket } from "./lib/ws";
 import { pushApi, runApi } from "./lib/api";
 import { urlBase64ToUint8Array } from "./lib/utils";
@@ -22,13 +23,18 @@ export default function App() {
     minFollowers: status?.filters?.minFollowers ?? 5000,
     minImportance: status?.filters?.minImportance ?? 0.5,
   };
-  const { items, loading, filters, setFilter, refresh, prepend } = useHotspots(thresholds);
+  const {
+    items, loading, filters, setFilter, refresh, prepend,
+    toggleSource, toggleKeyword, toggleQuickTag, reset, applyFilters,
+    sourceCounts,
+  } = useHotspots(thresholds);
   const { items: whitelistItems, refresh: refreshWhitelist } = useWhitelist();
 
   const [pushOn, setPushOn] = useState(false);
   const [triggering, setTriggering] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [newIds, setNewIds] = useState(new Set());
+  const toastHistory = useToastHistory();
 
   // 检测 Web Push 订阅状态
   useEffect(() => {
@@ -53,17 +59,19 @@ export default function App() {
           const imp = msg.data.importance ?? msg.data.ai_importance ?? 0;
           if (imp >= 0.7) {
             const id = Date.now() + Math.random();
-            setToasts((prev) => [
-              ...prev,
-              {
-                id,
-                title: `${(msg.data.source || "").toUpperCase()} · 重要度 ${imp.toFixed(2)}`,
-                msg: msg.data.title || msg.data.summary || "(无标题)",
-                url: msg.data.url,
-                ts: Date.now(),
-                kind: imp >= 0.85 ? "critical" : "info",
-              },
-            ].slice(-5));
+            const toastItem = {
+              id,
+              title: `${(msg.data.source || "").toUpperCase()} · 重要度 ${imp.toFixed(2)}`,
+              msg: msg.data.title || msg.data.summary || "(无标题)",
+              url: msg.data.url,
+              ts: Date.now(),
+              kind: imp >= 0.85 ? "critical" : "info",
+              source: msg.data.source,
+              importance: imp,
+            };
+            setToasts((prev) => [...prev, toastItem].slice(-5));
+            // 同步写入历史
+            toastHistory.addToast(toastItem);
             // 8s 自动消失
             setTimeout(() => {
               setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -71,7 +79,7 @@ export default function App() {
           }
         }
       },
-      [prepend]
+      [prepend, toastHistory]
     )
   );
 
@@ -150,6 +158,12 @@ export default function App() {
                 loading={loading}
                 filters={filters}
                 setFilter={setFilter}
+                toggleSource={toggleSource}
+                toggleKeyword={toggleKeyword}
+                toggleQuickTag={toggleQuickTag}
+                reset={reset}
+                applyFilters={applyFilters}
+                sourceCounts={sourceCounts}
                 onTriggerRun={triggerRun}
                 triggering={triggering}
                 newIds={newIds}
@@ -169,7 +183,21 @@ export default function App() {
         </main>
       </div>
 
-      <ToastStack toasts={toasts} onDismiss={(id) => setToasts((p) => p.filter((t) => t.id !== id))} />
+      <ToastStack
+        toasts={toasts}
+        onDismiss={(id) => setToasts((p) => p.filter((t) => t.id !== id))}
+        history={toastHistory.history}
+        unreadCount={toastHistory.unreadCount}
+        onToggleRead={(id) => {
+          // 切换已读/未读
+          const item = toastHistory.history.find((t) => t.id === id);
+          if (item?.read) toastHistory.markUnread(id);
+          else toastHistory.markRead(id);
+        }}
+        onMarkAllRead={toastHistory.markAllRead}
+        onClearHistory={toastHistory.clear}
+        onRemoveHistoryItem={toastHistory.remove}
+      />
     </AuroraBackground>
   );
 }

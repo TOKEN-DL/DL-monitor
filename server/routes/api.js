@@ -39,7 +39,15 @@ router.patch('/keywords/:id', (req, res) => {
 
 // ---------- hotspots ----------
 router.get('/hotspots', (req, res) => {
-  const { limit, source, min_importance, keyword, min_views, min_followers, archive } = req.query;
+  const {
+    limit, source, sources,            // source 单值（旧），sources 多值（新）
+    min_importance, min_importance_max,
+    keyword, keywords,                  // keyword 单值（旧），keywords 多值（新）
+    min_views, min_followers, archive,
+    sort,                              // recent / published / importance / burst
+    window,                            // 1h / 6h / 24h / 3d / 7d / all
+    quick_tag,                         // kol,burst 逗号分隔
+  } = req.query;
   // 默认应用两层过滤：twitter 走配置阈值；其他源走各自的浏览量/粉丝阈值
   const defaultMinViews = config.twitter.minViews;
   const defaultMinFollowers = config.twitter.minFollowers;
@@ -48,17 +56,39 @@ router.get('/hotspots', (req, res) => {
   const minFollowers = min_followers === undefined ? defaultMinFollowers : Number(min_followers);
   // 重要度阈值：min_importance=-1 或 0 表示禁用；其他值表示最低 AI 重要度
   const minImportance = min_importance === undefined ? defaultMinImportance : Number(min_importance);
+  const maxImportance = min_importance_max === undefined ? 1.0 : Number(min_importance_max);
   // 信息保留策略过滤：默认 active（仅显示 7 天内）
   // archive=archived → 只看归档；archive=all → 全部（含归档）
   const archiveMode = archive || 'active';
   const windowMs = config.retention.windowDays * 86400 * 1000;
+  // 时间窗覆盖：'all' = 0；其他按预设
+  const customWindowMs = (() => {
+    if (!window || window === 'all') return 0;
+    const map = { '1h': 3600 * 1000, '6h': 6 * 3600 * 1000, '24h': 24 * 3600 * 1000, '3d': 3 * 86400 * 1000, '7d': 7 * 86400 * 1000 };
+    return map[window] ?? windowMs;
+  })();
+  // 排序：默认 recent（fetched DESC）
+  const sortMode = ['recent', 'published', 'importance', 'burst'].includes(sort) ? sort : 'recent';
+  // 来源多选
+  const sourcesArr = sources ? String(sources).split(',').filter(Boolean) : null;
+  // 关键词多选
+  const keywordsArr = keywords ? String(keywords).split(',').filter(Boolean) : null;
+  // 一键标签
+  const quickTagsArr = quick_tag ? String(quick_tag).split(',').filter(Boolean) : [];
+
   let items = hotspotsRepo.list({
     limit: limit ? Number(limit) : 100,
     source: source || null,
+    sources: sourcesArr,
     minImportance: minImportance > 0 ? minImportance : 0,
+    maxImportance,
     keyword: keyword || null,
+    keywords: keywordsArr,
     archive: archiveMode,
     windowMs,
+    customWindowMs,
+    sort: sortMode,
+    quickTags: quickTagsArr,
   }).map(h => ({
     ...h,
     meta: h.meta ? safeJSON(h.meta) : null,
@@ -100,6 +130,50 @@ router.get('/hotspots', (req, res) => {
   }
 
   res.json({ items });
+});
+
+// 按来源计数（用于前端 chip 显示匹配数）— C3
+router.get('/hotspots/count-by-source', (req, res) => {
+  const {
+    source, sources, min_importance, min_importance_max,
+    keyword, keywords, min_followers, archive,
+    window, quick_tag,
+  } = req.query;
+  const defaultMinFollowers = config.twitter.minFollowers;
+  const defaultMinImportance = config.display.minImportance;
+  const minImportance = min_importance === undefined ? defaultMinImportance : Number(min_importance);
+  const maxImportance = min_importance_max === undefined ? 1.0 : Number(min_importance_max);
+  const archiveMode = archive || 'active';
+  const windowMs = config.retention.windowDays * 86400 * 1000;
+  const customWindowMs = (() => {
+    if (!window || window === 'all') return 0;
+    const map = { '1h': 3600 * 1000, '6h': 6 * 3600 * 1000, '24h': 24 * 3600 * 1000, '3d': 3 * 86400 * 1000, '7d': 7 * 86400 * 1000 };
+    return map[window] ?? windowMs;
+  })();
+  const sourcesArr = sources ? String(sources).split(',').filter(Boolean) : null;
+  const keywordsArr = keywords ? String(keywords).split(',').filter(Boolean) : null;
+  const quickTagsArr = quick_tag ? String(quick_tag).split(',').filter(Boolean) : [];
+
+  const { counts, total } = hotspotsRepo.countBySource({
+    source: source || null,
+    sources: sourcesArr,
+    minImportance: minImportance > 0 ? minImportance : 0,
+    maxImportance,
+    keyword: keyword || null,
+    keywords: keywordsArr,
+    archive: archiveMode,
+    windowMs,
+    customWindowMs,
+    quickTags: quickTagsArr,
+  });
+
+  // 已禁用的源计数清零
+  const enabledSources = sourcesRepo.enabledSet();
+  for (const k of Object.keys(counts)) {
+    if (!enabledSources.has(k)) delete counts[k];
+  }
+
+  res.json({ items: counts, total });
 });
 
 router.post('/hotspots/:id/archive', (req, res) => {

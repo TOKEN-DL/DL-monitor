@@ -44,7 +44,7 @@ export function HotspotCard({ h, isNew = false }) {
       exit={{ opacity: 0, scale: 0.96 }}
       transition={{ duration: 0.35, ease: "easeOut" }}
       className={cn(
-        "group relative overflow-hidden rounded-2xl border bg-gray-900/60 backdrop-blur-sm transition-all",
+        "group relative z-0 overflow-hidden rounded-2xl border bg-gray-900/60 backdrop-blur-sm transition-all",
         isArchived
           ? "border-amber-700/40 opacity-80"
           : isAccount
