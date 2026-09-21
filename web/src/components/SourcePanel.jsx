@@ -216,7 +216,7 @@ function AddSourceForm({ onAdd, onCancel, busy }) {
 }
 
 export function SourcePanel({ status, pushOn, onEnablePush }) {
-  const { items, loading, add, toggle, remove } = useSources();
+  const { items, loading, error, refresh, add, toggle, remove } = useSources();
   const [adding, setAdding] = useState(false);
   const [busyName, setBusyName] = useState(null);
 
